@@ -1,1 +1,212 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/*
+  12TribesNFT.sol
+  ----------------
+  Simple ERC-721 contract to mint up to 12 NFTs representing the 12 Tribes of Israel.
+  - Uses OpenZeppelin contracts
+  - Owner-only minting (for issuance control)
+  - Each token stores a tribe index (0..11) and an optional token-specific metadata URI
+  - Max supply is 12; prevents duplicate tribe assignment
+  - Supports batch minting and individual minting
+
+  NOTES:
+  - Requires OpenZeppelin contracts available in your environment (npm package @openzeppelin/contracts)
+  - Recommended workflow: upload token JSON metadata to IPFS (one JSON per tribe), set baseURI or tokenURIs,
+    then mint tokens pointing to IPFS metadata URIs.
+*/
+
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+
+contract TwelveTribesNFT is ERC721Enumerable, Ownable {
+    using Counters for Counters.Counter;
+    Counters.Counter private _tokenIdCounter;
+
+    uint256 public constant MAX_SUPPLY = 12;
+
+    // tribe names (read-only via public function)
+    string[12] private _tribeNames = [
+        "Reuben",
+        "Simeon",
+        "Levi",
+        "Judah",
+        "Dan",
+        "Naphtali",
+        "Gad",
+        "Asher",
+        "Issachar",
+        "Zebulun",
+        "Joseph",
+        "Benjamin"
+    ];
+
+    // tokenId => tribeIndex (0..11)
+    mapping(uint256 => uint8) private _tribeOf;
+
+    // tribeIndex => assigned (true if already minted)
+    mapping(uint8 => bool) private _tribeAssigned;
+
+    // optional per-token metadata URI (if empty, baseURI + tokenId will be used)
+    mapping(uint256 => string) private _tokenURIs;
+
+    string private _baseTokenURI;
+
+    event TribeMinted(address indexed to, uint256 indexed tokenId, uint8 tribeIndex, string uri);
+
+    constructor(string memory name_, string memory symbol_, string memory baseURI_) ERC721(name_, symbol_) {
+        _baseTokenURI = baseURI_;
+        // start token ids at 1 for readability (optional)
+        _tokenIdCounter.increment();
+    }
+
+    // ----------------------
+    // OWNER: mint functions
+    // ----------------------
+
+    /**
+     * @dev Mint a single tribe NFT to `to` with tribe index `tribeIndex` (0..11)
+     * Optional param `tokenURI_` allows pointing to IPFS metadata for this token.
+     */
+    function mintTribebyIndex(address to, uint8 tribeIndex, string memory tokenURI_) external onlyOwner returns (uint256) {
+        require(totalSupply() < MAX_SUPPLY, "Max supply reached");
+        require(tribeIndex < 12, "Invalid tribe index");
+        require(!_tribeAssigned[tribeIndex], "Tribe already assigned");
+
+        uint256 tokenId = _tokenIdCounter.current();
+        _tokenIdCounter.increment();
+
+        _safeMint(to, tokenId);
+        _tribeOf[tokenId] = tribeIndex;
+        _tribeAssigned[tribeIndex] = true;
+
+        if (bytes(tokenURI_).length > 0) {
+            _tokenURIs[tokenId] = tokenURI_;
+        }
+
+        emit TribeMinted(to, tokenId, tribeIndex, tokenURI_);
+        return tokenId;
+    }
+
+    /**
+     * @dev Batch mint multiple tribes in one call. `tribeIndices` should be unique values in 0..11.
+     * `tokenURIs` can be an array of equal length with empty strings where you want baseURI used.
+     */
+    function batchMint(address to, uint8[] calldata tribeIndices, string[] calldata tokenURIs) external onlyOwner {
+        require(tribeIndices.length == tokenURIs.length, "Length mismatch");
+        require(totalSupply() + tribeIndices.length <= MAX_SUPPLY, "Exceeds max supply");
+
+        for (uint256 i = 0; i < tribeIndices.length; i++) {
+            uint8 idx = tribeIndices[i];
+            require(idx < 12, "Invalid tribe index");
+            require(!_tribeAssigned[idx], "Tribe already assigned");
+
+            uint256 tokenId = _tokenIdCounter.current();
+            _tokenIdCounter.increment();
+
+            _safeMint(to, tokenId);
+            _tribeOf[tokenId] = idx;
+            _tribeAssigned[idx] = true;
+
+            if (bytes(tokenURIs[i]).length > 0) {
+                _tokenURIs[tokenId] = tokenURIs[i];
+            }
+
+            emit TribeMinted(to, tokenId, idx, tokenURIs[i]);
+        }
+    }
+
+    // ----------------------
+    // VIEW helpers
+    // ----------------------
+
+    function tribeNameOf(uint256 tokenId) public view returns (string memory) {
+        require(_exists(tokenId), "Token does not exist");
+        uint8 idx = _tribeOf[tokenId];
+        return _tribeNames[idx];
+    }
+
+    function tribeIndexOf(uint256 tokenId) public view returns (uint8) {
+        require(_exists(tokenId), "Token does not exist");
+        return _tribeOf[tokenId];
+    }
+
+    function allTribeNames() external view returns (string[12] memory) {
+        return _tribeNames;
+    }
+
+    function isTribeAssigned(uint8 tribeIndex) external view returns (bool) {
+        require(tribeIndex < 12, "Invalid tribe index");
+        return _tribeAssigned[tribeIndex];
+    }
+
+    // ----------------------
+    // Token URI logic
+    // ----------------------
+
+    /**
+     * @dev Set token-specific URI if needed (owner only)
+     */
+    function setTokenURI(uint256 tokenId, string memory uri) external onlyOwner {
+        require(_exists(tokenId), "Token does not exist");
+        _tokenURIs[tokenId] = uri;
+    }
+
+    function setBaseURI(string memory baseURI_) external onlyOwner {
+        _baseTokenURI = baseURI_;
+    }
+
+    function _baseURI() internal view override returns (string memory) {
+        return _baseTokenURI;
+    }
+
+    /**
+     * @dev Returns token URI: token-specific if set, otherwise baseURI + tokenId
+     */
+    function tokenURI(uint256 tokenId) public view override(ERC721) returns (string memory) {
+        require(_exists(tokenId), "Token does not exist");
+        string memory _tokenURI = _tokenURIs[tokenId];
+        if (bytes(_tokenURI).length > 0) {
+            return _tokenURI;
+        }
+        string memory base = _baseURI();
+        return bytes(base).length > 0 ? string(abi.encodePacked(base, _toString(tokenId))) : "";
+    }
+
+    // ----------------------
+    // Utilities
+    // ----------------------
+
+    // simple uint->string helper (not gas heavy since max supply is small)
+    function _toString(uint256 value) internal pure returns (string memory) {
+        // inspired by OpenZeppelin Strings.toString
+        if (value == 0) {
+            return "0";
+        }
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
+
+    // The following functions are overrides required by Solidity.
+    function _beforeTokenTransfer(address from, address to, uint256 tokenId) internal override(ERC721Enumerable) {
+        super._beforeTokenTransfer(from, to, tokenId);
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override(ERC721Enumerable) returns (bool) {
+        return super.supportsInterface(interfaceId);
+    }
+}
 
